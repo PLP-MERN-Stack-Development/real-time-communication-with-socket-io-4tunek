@@ -1,0 +1,215 @@
+// src/components/Chat.jsx
+import React, { useEffect, useRef, useState } from 'react';
+import axios from 'axios';
+import './Chat.css';
+
+export default function Chat({
+  socket,
+  username,
+  onLogout,
+  notificationsEnabled,
+  soundEnabled,
+  toggleNotifications,
+  toggleSound
+}) {
+  const [rooms, setRooms] = useState([]);
+  const [currentRoom, setCurrentRoom] = useState('general');
+  const [messages, setMessages] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [typingUsers, setTypingUsers] = useState([]);
+  const [text, setText] = useState('');
+  const [fileQueue, setFileQueue] = useState([]);
+  const messagesRef = useRef();
+  const typingTimeoutRef = useRef();
+
+  // NEW: Sound
+  const soundRef = useRef(new Audio('/notify.mp3'));
+
+  // NEW: Toast
+  const [toast, setToast] = useState(null);
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2500);
+  };
+
+  // SOCKET LISTENERS
+  useEffect(() => {
+    if (!socket) return;
+
+    socket.on('rooms_list', (r) => setRooms(r || []));
+    socket.on('user_list', (u) => setUsers(u || []));
+    socket.on('message_history', ({ room, history }) => {
+      if (room === currentRoom) setMessages(history || []);
+      scrollToBottom();
+    });
+
+    socket.on('receive_message', (msg) => {
+      if (msg.room === currentRoom) setMessages((prev) => [...prev, msg]);
+      scrollToBottom();
+      handleNewMessageAlert(msg);
+    });
+
+    socket.on('private_message', (msg) => {
+      handleNewMessageAlert(msg);
+    });
+
+    socket.on('typing_users', ({ room, users }) => {
+      if (room === currentRoom) setTypingUsers(users || []);
+    });
+
+    return () => {
+      socket.off('rooms_list');
+      socket.off('user_list');
+      socket.off('message_history');
+      socket.off('receive_message');
+      socket.off('private_message');
+      socket.off('typing_users');
+    };
+  }, [socket, currentRoom]);
+
+  // NEW: Notification + Sound handler
+  const handleNewMessageAlert = (msg) => {
+    if (msg.sender === username) return;
+
+    // Toast
+    showToast(`New message from ${msg.sender}`);
+
+    // Sound
+    if (soundEnabled) {
+      soundRef.current.currentTime = 0;
+      soundRef.current.play();
+    }
+
+    // Browser notification
+    if (notificationsEnabled && document.hidden) {
+      if (Notification.permission === 'granted') {
+        new Notification(`Message from ${msg.sender}`, {
+          body: msg.text,
+          icon: '/favicon.ico'
+        });
+      }
+    }
+  };
+
+  const scrollToBottom = () => {
+    if (messagesRef.current) messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
+  };
+
+  const joinRoom = (room) => {
+    socket.emit('join_room', room);
+    setCurrentRoom(room);
+    setMessages([]);
+  };
+
+  const sendMessage = async () => {
+    if (!text && fileQueue.length === 0) return;
+
+    let attachments = [];
+    if (fileQueue.length) {
+      const form = new FormData();
+      fileQueue.forEach((f) => form.append('files', f));
+      const res = await axios.post(
+        `${import.meta.env.VITE_SERVER_URL || 'http://localhost:5000'}/api/upload`,
+        form
+      );
+      attachments = res.data.files.map((f) => ({ url: f.url, name: f.originalName }));
+      setFileQueue([]);
+    }
+
+    socket.emit('send_message', { room: currentRoom, text, attachments });
+    setText('');
+  };
+
+  // TYPING ANIMATION
+  const handleTyping = (e) => {
+    setText(e.target.value);
+    socket.emit('typing', { room: currentRoom, isTyping: true });
+    clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => {
+      socket.emit('typing', { room: currentRoom, isTyping: false });
+    }, 700);
+  };
+
+  return (
+    <div className="chat-container">
+
+      {/* NEW: Toggles but DOES NOT affect UI layout */}
+      <div style={{ position: "absolute", top: 5, left: "50%", transform: "translateX(-50%)", display: "flex", gap: "10px" }}>
+        <button onClick={toggleNotifications}>
+          Notifications: {notificationsEnabled ? "ON" : "OFF"}
+        </button>
+        <button onClick={toggleSound}>
+          Sound: {soundEnabled ? "ON" : "OFF"}
+        </button>
+      </div>
+
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          position: 'absolute',
+          top: 60,
+          left: '50%',
+          transform: 'translateX(-50%)',
+          background: '#333',
+          color: 'white',
+          padding: '10px 15px',
+          borderRadius: '6px'
+        }}>
+          {toast}
+        </div>
+      )}
+
+      {/* --- existing UI unchanged below --- */}
+      <aside className="chat-sidebar">
+        <h4>Rooms</h4>
+        {rooms.map((r) => (
+          <div key={r} className={`room-item ${r === currentRoom ? 'active' : ''}`} onClick={() => joinRoom(r)}>
+            {r}
+          </div>
+        ))}
+      </aside>
+
+      <main className="chat-main">
+        <div className="messages" ref={messagesRef}>
+          {messages.map((m) => (
+            <div key={m.id} className="message">
+              <div className="message-header">
+                <strong>{m.sender}</strong>
+                <small>{new Date(m.timestamp).toLocaleTimeString()}</small>
+              </div>
+              <div>{m.text}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* NEW Typing animation */}
+        {typingUsers.length > 0 && (
+          <div className="typing-indicator">
+            {typingUsers.join(', ')}
+            <span className="dots"> is typing...</span>
+          </div>
+        )}
+
+        <div className="composer">
+          <input type="text" value={text} onChange={handleTyping} placeholder="Type a message..." />
+          <input type="file" multiple onChange={(e) => setFileQueue([...e.target.files])} />
+          <button onClick={sendMessage}>Send</button>
+        </div>
+      </main>
+
+      <aside className="chat-users">
+        <h4>People</h4>
+        {users.map((u) => (
+          <div key={u.id} className="user-item">
+            {u.username}
+            <button onClick={() => socket.emit('private_message', { toSocketId: u.id, text: `Hi ${u.username}` })}>
+              DM
+            </button>
+          </div>
+        ))}
+        <button onClick={onLogout} className="logout-btn">Logout</button>
+      </aside>
+    </div>
+  );
+}
